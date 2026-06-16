@@ -5,11 +5,17 @@
 # Powers the VM off (graceful, then forced) and applies a hardened config:
 #   * clipboard + drag-and-drop disabled
 #   * ALL shared folders removed
-#   * networking: nic1 DETACHED by default (no outbound), host-only nic2 for SSH
+#   * networking: nic1 NAT with a single host->guest SSH port-forward
 #   * fixed RAM / CPU count
 #   * audio + USB controllers disabled (attack-surface reduction)
 #
 # Safe to re-run: every change is declarative and reapplied each time.
+#
+# NOTE on scope: this hardens the host<->guest data channels and pins the SSH
+# control path. It does NOT isolate the network — nic1 NAT gives the guest full
+# outbound internet by design (that's how the control channel works without any
+# guest-side config). The single guarantee is host-filesystem isolation +
+# disposable rollback. See the README threat model.
 #
 set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -45,31 +51,27 @@ else
   ok "Shared folders removed."
 fi
 
-# --- Networking: detached nic1 (baseline) + host-only nic2 for SSH ---
-# nic1 is the OPTIONAL internet adapter. Its BASELINE is detached (null) so the
-# 'clean-base' snapshot captures a no-outbound posture: every run boots isolated
-# and only `vm-cycle.sh --net` flips nic1 to NAT. See lib/config.sh.
-set_nic1_mode "${NIC1_DETACHED_MODE}"
-ok "nic1=${NIC1_DETACHED_MODE} (detached): baseline posture has NO outbound network."
+# --- Networking: nic1 NAT + a single SSH port-forward (idempotent) ---
+# NAT needs no guest-side network config (Ubuntu DHCPs the NAT NIC on its own),
+# so the host->guest SSH path survives reboots and snapshot restores without any
+# in-guest static IP / netplan. nic2 is left detached: a single NIC is all the
+# control channel needs, and fewer NICs is less surface.
+VBoxManage modifyvm "${VM_NAME}" --nic1 nat
+VBoxManage modifyvm "${VM_NAME}" --nic2 none
 
-# SSH no longer rides NAT, so drop any stale nic1 port-forwards (read, then act).
-mapfile -t _portfwds < <(
-  VBoxManage showvminfo "${VM_NAME}" --machinereadable \
-    | sed -n 's/^Forwarding([0-9]*)="\([^,]*\),.*$/\1/p'
-)
+# Clear ANY existing nic1 forward occupying the host SSH port, regardless of its
+# rule name (read the current rules first, then act), so we never collide on the
+# host port when we re-add ours.
+mapfile -t _portfwds < <(nic1_ssh_forwards)
 for _fwd in "${_portfwds[@]}"; do
   [ -n "${_fwd}" ] || continue
-  log "Removing stale NAT port-forward '${_fwd}' (SSH now uses host-only nic2)"
+  log "Removing conflicting NAT forward '${_fwd}' (host port ${HOST_SSH_PORT})"
   VBoxManage modifyvm "${VM_NAME}" --natpf1 delete "${_fwd}" 2>/dev/null || true
 done
 
-# nic2 is a PERMANENT host-only control link: host->guest reachable, but it
-# carries no internet route, so SSH survives with nic1 detached. The flag name
-# differs across VirtualBox versions, so try the new spelling then the old.
-ensure_hostonly_if
-VBoxManage modifyvm "${VM_NAME}" --nic2 hostonly --host-only-adapter2 "${HOSTONLY_IF}" 2>/dev/null \
-  || VBoxManage modifyvm "${VM_NAME}" --nic2 hostonly --hostonlyadapter2 "${HOSTONLY_IF}"
-ok "nic2=hostonly on ${HOSTONLY_IF}; guest SSH target ${HOSTONLY_GUEST_IP}:${GUEST_SSH_PORT}."
+VBoxManage modifyvm "${VM_NAME}" \
+  --natpf1 "${SSH_RULE_NAME},tcp,${HOST_SSH_ADDR},${HOST_SSH_PORT},,${GUEST_SSH_PORT}"
+ok "nic1=nat, forward ${HOST_SSH_ADDR}:${HOST_SSH_PORT} -> guest:${GUEST_SSH_PORT} (rule '${SSH_RULE_NAME}')."
 
 # --- Resources ---
 VBoxManage modifyvm "${VM_NAME}" --memory "${VM_MEMORY_MB}" --cpus "${VM_CPUS}"
@@ -105,28 +107,20 @@ before the snapshot. Do this once:
 
          # Create a NON-sudo user to run untrusted code as:
          sudo adduser --disabled-password --gecos "" ${RUNNER_USER}
-         sudo passwd ${RUNNER_USER}        # set a password (or install a key)
+         sudo passwd ${RUNNER_USER}        # set a password for the one-time key install
          # IMPORTANT: do NOT add '${RUNNER_USER}' to the sudo/admin group.
 
-         # (optional, recommended) install your host pubkey for key auth:
-         #   sudo -u ${RUNNER_USER} mkdir -p /home/${RUNNER_USER}/.ssh
-         #   ...append your id_*.pub to authorized_keys, chmod 600...
+  3. From the HOST, install your VM key for passwordless SSH (one-time; uses the
+     password you just set). Generate the key first if you don't have it:
+         [ -f ${SSH_KEY} ] || ssh-keygen -t ed25519 -N "" -f ${SSH_KEY}
+         ssh-copy-id -i ${SSH_KEY}.pub -p ${HOST_SSH_PORT} \\
+             -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \\
+             ${RUNNER_USER}@${HOST_SSH_ADDR}
 
-  3. Give nic2 (the host-only control link) a STATIC IP so the host can SSH in
-     even while nic1 is detached. Find the 2nd interface name, then configure it:
-         ip -o link show | awk -F': ' '{print \$2}'   # e.g. enp0s8
-
-         # Create /etc/netplan/99-hostonly.yaml (match YOUR nic2 name), 0600:
-         #   network:
-         #     version: 2
-         #     ethernets:
-         #       enp0s8:
-         #         dhcp4: no
-         #         addresses: [${HOSTONLY_GUEST_IP}/24]
-         sudo netplan apply
-
-  4. Verify from the HOST that SSH answers over the host-only link:
-         ssh -p ${SSH_PORT} ${RUNNER_USER}@${SSH_ADDR}
+  4. Verify passwordless, non-interactive SSH from the HOST:
+         ssh -i ${SSH_KEY} -p ${HOST_SSH_PORT} -o BatchMode=yes \\
+             -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \\
+             ${RUNNER_USER}@${HOST_SSH_ADDR} 'echo OK'
 
   5. Power the guest off cleanly, then capture the clean baseline:
          ./vm-cycle.sh --snapshot
