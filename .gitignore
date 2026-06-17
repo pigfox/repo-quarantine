@@ -27,6 +27,14 @@ go.work.sum
 # env file
 .env
 
+# SSH key material — NEVER commit keys. The repo ships none; users bring their
+# own. Belt-and-suspenders deny list so a stray key can't be added by accident.
+id_*
+*.pem
+*.key
+vm_runner*
+vm_admin*
+
 # Editor/IDE
 # .idea/
 # .vscode/

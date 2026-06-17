@@ -93,31 +93,48 @@ cat >&2 <<EOF
 ----------------------------------------------------------------------
 NEXT STEPS (one-time guest setup, then snapshot)
 ----------------------------------------------------------------------
-The guest still needs an SSH server and an UNPRIVILEGED 'runner' user
-before the snapshot. Do this once:
+The guest still needs an SSH server and TWO accounts before the snapshot:
+  * '${ADMIN_USER}'  — passwordless-sudo provisioning account (key: ${ADMIN_SSH_KEY})
+  * '${RUNNER_USER}' — UNPRIVILEGED account untrusted code runs as (key: ${SSH_KEY})
+The repo ships NO keys — you generate your own below and the scripts install
+YOUR public keys. Do this once:
 
   1. Boot the VM with a console so you can log in:
          VBoxManage startvm "${VM_NAME}" --type gui
      (or --type separate / --type headless + the VirtualBox UI)
 
-  2. Inside the guest, as your existing admin user, run:
+  2. Inside the guest, as your existing installer admin user, run:
          sudo apt-get update
          sudo apt-get install -y openssh-server
          sudo systemctl enable --now ssh
 
-         # Create a NON-sudo user to run untrusted code as:
+         # Provisioning account WITH passwordless sudo (disposable; see README):
+         sudo adduser --gecos "" ${ADMIN_USER}        # set a password for the one-time key install
+         sudo usermod -aG sudo ${ADMIN_USER}
+         echo '${ADMIN_USER} ALL=(ALL) NOPASSWD:ALL' | sudo tee /etc/sudoers.d/${ADMIN_USER}-nopasswd
+         sudo chmod 440 /etc/sudoers.d/${ADMIN_USER}-nopasswd
+         sudo visudo -cf /etc/sudoers.d/${ADMIN_USER}-nopasswd   # validate
+
+         # NON-sudo account untrusted code runs as:
          sudo adduser --disabled-password --gecos "" ${RUNNER_USER}
          sudo passwd ${RUNNER_USER}        # set a password for the one-time key install
          # IMPORTANT: do NOT add '${RUNNER_USER}' to the sudo/admin group.
 
-  3. From the HOST, install your VM key for passwordless SSH (one-time; uses the
-     password you just set). Generate the key first if you don't have it:
-         [ -f ${SSH_KEY} ] || ssh-keygen -t ed25519 -N "" -f ${SSH_KEY}
+  3. From the HOST, generate your own dedicated keys (if absent) and install the
+     PUBLIC half into each account (one-time; uses the passwords you just set):
+         [ -f ${ADMIN_SSH_KEY} ] || ssh-keygen -t ed25519 -N "" -f ${ADMIN_SSH_KEY}
+         [ -f ${SSH_KEY} ]       || ssh-keygen -t ed25519 -N "" -f ${SSH_KEY}
+         ssh-copy-id -i ${ADMIN_SSH_KEY}.pub -p ${HOST_SSH_PORT} \\
+             -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \\
+             ${ADMIN_USER}@${HOST_SSH_ADDR}
          ssh-copy-id -i ${SSH_KEY}.pub -p ${HOST_SSH_PORT} \\
              -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \\
              ${RUNNER_USER}@${HOST_SSH_ADDR}
 
   4. Verify passwordless, non-interactive SSH from the HOST:
+         ssh -i ${ADMIN_SSH_KEY} -p ${HOST_SSH_PORT} -o BatchMode=yes \\
+             -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \\
+             ${ADMIN_USER}@${HOST_SSH_ADDR} 'sudo whoami'   # must print: root
          ssh -i ${SSH_KEY} -p ${HOST_SSH_PORT} -o BatchMode=yes \\
              -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \\
              ${RUNNER_USER}@${HOST_SSH_ADDR} 'echo OK'

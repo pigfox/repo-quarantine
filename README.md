@@ -1,9 +1,16 @@
 # repo-quarantine
 
+A **Pigfox** tool — `github.com/pigfox/repo-quarantine`.
+
 A tiny host-side toolkit for cloning and running an **untrusted repository**
 inside a disposable VirtualBox VM, then throwing the VM away. Language-agnostic:
 web apps (Laravel/PHP, Node) and crypto/Web3 repos (Rust/Foundry/Hardhat/Solana/
 Python) alike.
+
+> **What is published is the *repo* — these scripts plus this README — never a
+> VM image.** The advertised artifact is the tooling that *builds* a clean
+> baseline; the baseline itself stays on your machine. The repo ships **zero
+> keys**: you generate your own and the scripts install *your* public keys.
 
 > **Read the threat model below before you trust this with anything.**
 > Quarantine here means **one specific** protection — a disposable
@@ -62,7 +69,7 @@ judging the code is your responsibility (the tool never does).
 
 | File | Runs on | Purpose |
 | --- | --- | --- |
-| `lib/config.sh` | host | Shared config (VM name, snapshot, runner, SSH NAT port-forward, key) + guard helpers. Sourced by both scripts. |
+| `lib/config.sh` | host | Shared config (VM name, snapshot, the `runner`/`admin` accounts + their keys, SSH NAT port-forward) + guard helpers. Sourced by both scripts. |
 | `vm-harden.sh` | host | One-time: idempotently lock the VM down — no clipboard/drag-drop/shares, nic1 NAT + a single host->guest SSH port-forward, fixed RAM/CPU, audio/USB off. |
 | `vm-cycle.sh` | host | Every run: restore `clean-base`, boot headless, wait for SSH, drop you into the VM as `runner` (key auth); on exit/Ctrl-C, power off and roll back. `--snapshot` captures the baseline. |
 
@@ -70,9 +77,36 @@ Both host scripts read VM state **before** any state-changing `VBoxManage` call,
 print actionable errors, and centralize every magic literal in `lib/config.sh`
 (override any value via the environment, e.g. `VM_NAME=other ./vm-cycle.sh`).
 
-Defaults: `VM_NAME=ubuntu-vm`, SSH `127.0.0.1:2222 -> guest:22` (key
-`~/.ssh/vm_runner`), snapshot `clean-base`, user `runner`, `4096 MB` RAM,
-`2` CPUs.
+Defaults: `VM_NAME=ubuntu-vm`, SSH `127.0.0.1:2222 -> guest:22`, snapshot
+`clean-base`, `4096 MB` RAM, `2` CPUs, and two guest accounts —
+`runner` (non-sudo, key `~/.ssh/vm_runner`) for untrusted code, and
+`admin` (passwordless sudo, key `~/.ssh/vm_admin`) for provisioning only.
+
+---
+
+## Accounts, keys, and what gets published — by design
+
+Three choices below are deliberate. They are design, not oversight:
+
+- **The published artifact is the *scripts*, not a VM image.** This repo ships
+  the tooling that *builds* a `clean-base` baseline on your machine; it never
+  ships the baseline. So your local snapshot may contain *your* public keys
+  (harmless — it stays local), while the **repo itself contains no keys, no
+  personal usernames, and no hardcoded home paths** (everything resolves from
+  `$HOME` and overridable config vars).
+- **You bring your own keys.** The repo ships **zero** keys. During one-time
+  setup *you* generate `~/.ssh/vm_admin` and `~/.ssh/vm_runner`, and the scripts
+  install *your* public halves into the guest. Nobody else's key is ever baked
+  in. `.gitignore` blocks key material belt-and-suspenders so a stray key can't
+  be committed by accident.
+- **`admin` has passwordless (NOPASSWD) sudo — intentionally.** `admin` is a
+  *disposable provisioning account* used only to install toolchains and shape
+  the baseline; it is wiped with every rollback. The **SSH key is the real
+  gate** — without `~/.ssh/vm_admin` you cannot log in as `admin` at all, so a
+  sudo password would only guard an account you already had to hold a private
+  key to reach. Untrusted code never runs as `admin`; it runs **only** as the
+  non-sudo `runner`. If a repo demands `sudo` while running as `runner`, that is
+  a finding to investigate, not an instruction to follow.
 
 ---
 
@@ -84,8 +118,9 @@ Defaults: `VM_NAME=ubuntu-vm`, SSH `127.0.0.1:2222 -> guest:22` (key
 ./vm-harden.sh
 
 # 2. Follow the printed NEXT STEPS: boot the VM once, install openssh-server,
-#    create the NON-sudo 'runner' user, then (from the host) ssh-copy-id your
-#    VM key into runner for passwordless auth. (vm-harden.sh prints exact
+#    create the disposable 'admin' (passwordless sudo) and NON-sudo 'runner'
+#    accounts, generate your own vm_admin + vm_runner keys, then (from the host)
+#    ssh-copy-id YOUR public keys into each account. (vm-harden.sh prints exact
 #    commands.)
 
 # 3. Capture the clean baseline every run restores to.

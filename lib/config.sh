@@ -10,7 +10,13 @@
 # ---------------------------------------------------------------------------
 VM_NAME="${VM_NAME:-ubuntu-vm}"
 SNAPSHOT_NAME="${SNAPSHOT_NAME:-clean-base}"
+# Two guest accounts, two roles:
+#   RUNNER_USER — unprivileged, NO sudo. Untrusted code runs ONLY as this user.
+#   ADMIN_USER  — disposable provisioning account WITH passwordless sudo, used
+#                 only to install toolchains / set up the baseline. Its SSH key
+#                 is the real gate (see README). Untrusted code never runs here.
 RUNNER_USER="${RUNNER_USER:-runner}"
+ADMIN_USER="${ADMIN_USER:-admin}"
 
 # --- Networking + SSH control channel --------------------------------------
 # The control channel rides nic1 in NAT mode with a single host->guest SSH
@@ -22,9 +28,13 @@ HOST_SSH_ADDR="${HOST_SSH_ADDR:-127.0.0.1}"   # host side of the port-forward
 HOST_SSH_PORT="${HOST_SSH_PORT:-2222}"         # host side of the port-forward
 GUEST_SSH_PORT="${GUEST_SSH_PORT:-22}"         # sshd inside the guest
 SSH_RULE_NAME="${SSH_RULE_NAME:-ssh}"          # name of the NAT port-forward
-# Private key the host authenticates with (its .pub goes in runner's
-# authorized_keys). A VM-dedicated key keeps this isolated from your other keys.
-SSH_KEY="${SSH_KEY:-${HOME}/.ssh/vm_runner}"
+# Private keys the host authenticates with (their .pub goes in the matching
+# account's authorized_keys). VM-dedicated keys keep this isolated from your
+# other keys. These are USER-LOCAL: they live in ~/.ssh on the host and are
+# NEVER committed to this repo (see .gitignore). Each user generates their own;
+# the scripts install the USER's public key, never anyone else's.
+SSH_KEY="${SSH_KEY:-${HOME}/.ssh/vm_runner}"          # -> RUNNER_USER (non-sudo)
+ADMIN_SSH_KEY="${ADMIN_SSH_KEY:-${HOME}/.ssh/vm_admin}"  # -> ADMIN_USER (sudo)
 
 VM_MEMORY_MB="${VM_MEMORY_MB:-4096}"
 VM_CPUS="${VM_CPUS:-2}"
